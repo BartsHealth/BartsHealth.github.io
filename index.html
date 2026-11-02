@@ -1,10 +1,10 @@
 <!doctype html>
-<!-- Barts Wi-Fi Refresh Planner page, version 1.2 (2 Nov 2026). Change PAGE_VERSION below and the version text in the header when you edit this file. -->
+<!-- Barts Wi-Fi Refresh Planner page, version 1.4 (2 Nov 2026). Change PAGE_VERSION below and the version text in the header when you edit this file. -->
 <html lang="en-GB">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="version" content="1.2">
+<meta name="version" content="1.4">
 <title>Barts Wi-Fi Refresh Planner</title>
 <meta name="description" content="Order of works and dates for the Barts Health Wi-Fi access point refresh, read from the planner spreadsheet.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -78,6 +78,12 @@ section.panel{background:var(--surface);border:1px solid var(--line);border-radi
 .phase .name{font-weight:600;line-height:1.3}
 .phase dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:2px 10px;font-size:13px}
 .phase dt{color:var(--muted)} .phase dd{margin:0;font-variant-numeric:tabular-nums}
+
+/* planned vs actual */
+#progFigs .fig b{font-size:21px}
+#progFigs .fig b.later{color:var(--crit-text)} #progFigs .fig b.earlier{color:var(--good-text)}
+.key{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--fg2)}
+.key svg{flex:none}
 
 /* install time */
 .wi{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px 28px;align-items:start}
@@ -167,7 +173,7 @@ details.iss summary{cursor:pointer;font-family:var(--f-display);font-weight:600;
     <h1>Wi-Fi Refresh Planner</h1>
     <p class="sub">Every site and building in the access point refresh, in the order the work is being done. The dates are worked out from the planner spreadsheet each time this page opens.</p>
     <div class="source" id="source"></div>
-    <span class="ver" id="ver">Page version 1.2 · 2 Nov 2026</span>
+    <span class="ver" id="ver">Page version 1.4 · 2 Nov 2026</span>
     <div class="figures" id="figures" aria-live="polite"></div>
     <div class="banner" id="banner" hidden></div>
   </header>
@@ -190,6 +196,17 @@ details.iss summary{cursor:pointer;font-family:var(--f-display);font-weight:600;
       </div>
       <div class="strip" id="strip" role="img" aria-label="Phases sized by AP count"></div>
       <div class="phases" id="phases"></div>
+    </section>
+
+    <section class="panel" aria-labelledby="h-prog">
+      <div class="panel-head">
+        <h2 id="h-prog">Planned vs actual</h2>
+        <p>APs installed over time. The actual line comes from the Install Log tab in the spreadsheet.</p>
+      </div>
+      <div class="figures" id="progFigs"></div>
+      <div class="chart" id="progChart"><div id="progSvg"></div><div class="tip" id="progTip" hidden></div></div>
+      <div class="legend" id="progLegend"></div>
+      <p class="hint" id="progNote"></p>
     </section>
 
     <section class="panel" aria-labelledby="h-wi">
@@ -247,7 +264,7 @@ details.iss summary{cursor:pointer;font-family:var(--f-display);font-weight:600;
 "use strict";
 // The spreadsheet this page reads. Keep it in the same folder as this page.
 const XLSX_FILE = "Barts_WiFi_Refresh_Planner.xlsx";
-const PAGE_VERSION = "1.2 · 2 Nov 2026"; // keep in step with the version text in the header
+const PAGE_VERSION = "1.4 · 2 Nov 2026"; // keep in step with the version text in the header
 
 const SITE_COLOURS = { RLH:"--s-rlh", MEH:"--s-meh", SBH:"--s-sbh", RS:"--s-rs", NUH:"--s-nuh", WCH:"--s-wch" };
 const MIN_STEPS = [5,10,15,20,25,30,35,40,45,50,55,60];
@@ -352,7 +369,16 @@ function readWorkbook(wb, source){
   if (gi){ const h=findRow(gi, r=>norm(r[0])==="#" && norm(r[1])==="issue"); if (h>=0){ const hdr=(gi[h]||[]).map(norm);
     for (let i=h+1;i<gi.length;i++){ const r=gi[i]||[]; if (!cellText(r[1])) continue; const o={}; hdr.forEach((k,j)=>{ if (k) o[k]=cellText(r[j]); }); issues.push(o); } } }
 
-  return { rows, settings, phases, baselineName, nwd, issues, source };
+  // Install log: APs actually installed, one row per building per day
+  const log=[]; const gl = grid("Install Log");
+  if (gl){ const h=findRow(gl, r=>norm(r[0])==="date" && r.some(c=>norm(c).startsWith("aps installed")));
+    if (h>=0){ const hdr=(gl[h]||[]).map(norm); const ci=k=>hdr.findIndex(x=>x.startsWith(k));
+      const cd=ci("date"), cb=ci("building"), ca=ci("aps installed"), cn=ci("notes");
+      for (let i=h+1;i<gl.length;i++){ const r=gl[i]||[]; const d=cellDate(r[cd]); const n=cellNum(r[ca]);
+        if (d && n!=null && n>0) log.push({ date:d, building:cb>=0?cellText(r[cb]):"", aps:n, notes:cn>=0?cellText(r[cn]):"" }); } } }
+  log.sort((a,b)=>a.date<b.date?-1:a.date>b.date?1:0);
+
+  return { rows, settings, phases, baselineName, nwd, issues, log, source };
 }
 
 /* ---------------- working days and the schedule ---------------- */
@@ -374,17 +400,23 @@ function computePlan(m){
   if (fixedEnds.length){ const after=nextWork(addDays(parse(maxIso(fixedEnds)),1)); if (after>start) start=after; }
   let day=nextWork(start), used=0, prev=null;
   const next=()=>{ day=nextWork(addDays(day,1)); used=0; };
-  const out=new Map();
+  const out=new Map(), daily=new Map();
+  const addDay=(d,n)=>{ const k=iso(d); daily.set(k,(daily.get(k)||0)+n); };
   for (const r of model.rows){
-    if (isFixed(r)) { out.set(r.id,{start:r.fixedStart,end:r.fixedEnd,fixed:true}); continue; }
+    if (isFixed(r)) { out.set(r.id,{start:r.fixedStart,end:r.fixedEnd,fixed:true});
+      if (inScope(r)){ const ds=[]; for (let x=parse(r.fixedStart); x<=parse(r.fixedEnd); x=addDays(x,1)) if (isWork(x)) ds.push(new Date(x));
+        if (!ds.length) ds.push(parse(r.fixedEnd)); const base=Math.floor(r.aps/ds.length); let extra=r.aps-base*ds.length;
+        ds.forEach(d=>{ addDay(d, base+(extra>0?1:0)); if (extra>0) extra--; }); }
+      continue; }
     if (!inScope(r)) continue;
     const key = r.site==="RS" ? r.building : r.site;
     if (prev!==null && key!==prev && used>0 && s.newSiteDay) next();
     if (used>=cap(day)) next();
     const st=new Date(day); let rem=r.aps;
-    while (rem>0){ const take=Math.min(cap(day)-used, rem); used+=take; rem-=take; if (rem>0) next(); }
+    while (rem>0){ const take=Math.min(cap(day)-used, rem); used+=take; rem-=take; addDay(day, take); if (rem>0) next(); }
     out.set(r.id,{start:iso(st), end:iso(day)}); prev=key;
   }
+  out.daily = daily; // planned APs per working day
   return out;
 }
 function phaseSummary(plan){
@@ -400,7 +432,125 @@ function phaseSummary(plan){
 /* ---------------- rendering ---------------- */
 function renderAll(){
   const plan=computePlan(mins); const ph=phaseSummary(plan);
-  renderFigures(plan, ph); renderOrder(ph); renderInstall(plan, ph); renderTimeline(plan, ph); renderTable(plan, ph); renderIssues(); renderFoot();
+  renderFigures(plan, ph); renderOrder(ph); renderProgress(plan); renderInstall(plan, ph); renderTimeline(plan, ph); renderTable(plan, ph); renderIssues(); renderFoot();
+}
+
+/* ---------------- planned vs actual ---------------- */
+const teamsOn = d => { const s=model.settings; return s.teams2!=null && s.from2 && iso(d)>=s.from2 ? s.teams2 : s.teams1; };
+// Cumulative series over working days from a per-day map
+function cumulative(daily, from, to){
+  const pts=[]; let c=0;
+  for (let x=new Date(from); x<=to; x=addDays(x,1)){ if (!isWork(x)) continue; c+=daily.get(iso(x))||0; pts.push({d:new Date(x), v:c}); }
+  return pts;
+}
+function renderProgress(planAtMins){
+  const s=model.settings, today=new Date(); today.setHours(0,0,0,0);
+  const total=model.rows.filter(inScope).reduce((a,r)=>a+r.aps,0);
+  const base=computePlan(s.mins); const baseDaily=base.daily;
+  const pDays=[...baseDaily.keys()].sort(), pStart=parse(pDays[0]), pEnd=parse(pDays[pDays.length-1]);
+  // actuals by day
+  const act=new Map(); for (const e of model.log) act.set(e.date,(act.get(e.date)||0)+e.aps);
+  const aDays=[...act.keys()].sort(); const installed=[...act.values()].reduce((a,b)=>a+b,0);
+  const firstLog=aDays.length?parse(aDays[0]):null, lastLog=aDays.length?parse(aDays[aDays.length-1]):null;
+  // compare at the last logged day (or today if nothing is logged yet)
+  const asOf = lastLog && lastLog<today ? lastLog : today;
+  let plannedToday=0; for (const [k,v] of baseDaily) if (k<=iso(asOf)) plannedToday+=v;
+  // Recent pace: what was installed against what the plan expected, over the last 10 working days
+  // that had installs planned or logged (gaps with nothing planned don't count either way)
+  let pace=null, paceRatio=null, paceMins=null, paceDays=0, paceFrom=null, forecast=null, fcPts=[];
+  if (installed>0){
+    const lower = pStart<firstLog ? pStart : firstLog;
+    const counted=[]; for (let x=new Date(asOf); x>=lower && counted.length<10; x=addDays(x,-1)) if (isWork(x) && (baseDaily.get(iso(x)) || act.get(iso(x)))) counted.push(new Date(x));
+    let planned=0, done=0; for (const x of counted){ planned+=baseDaily.get(iso(x))||0; done+=act.get(iso(x))||0; }
+    paceDays=counted.length; paceFrom=counted[counted.length-1];
+    pace = done/Math.max(1,counted.length);
+    paceRatio = planned>0 ? done/planned : 1;
+    paceMins = Math.min(120, Math.max(5, s.mins/Math.max(paceRatio,0.01)));
+    // Forecast: carry on from today's actual total, running the rest of the plan at the recent pace
+    if (installed<total){
+      const eff = computePlan(paceMins).daily; const effDays=[...eff.keys()].sort();
+      let x=nextWork(addDays(asOf,1)), c=installed; fcPts.push({d:new Date(asOf), v:installed});
+      const effAt=k=>{ let t=0; for (const d of effDays){ if (d<=k) t+=eff.get(d); else break; } return t; };
+      const base0=effAt(iso(asOf)); let last=base0;
+      for (let guard=0; guard<3000 && c<total; guard++){
+        const cum=effAt(iso(x)); let step=cum-last; last=cum;
+        if (step<=0 && iso(x)>effDays[effDays.length-1]) step=teamsOn(x)*s.hours*60/paceMins; // past the end of the plan: keep going at the pace
+        c=Math.min(total, c+Math.max(0,step)); fcPts.push({d:new Date(x), v:c}); if (c<total) x=nextWork(addDays(x,1));
+      }
+      forecast=x;
+    } else forecast=lastLog;
+  }
+  // how far ahead or behind, in working days: when did (or will) the plan reach the installed total?
+  let varDays=null;
+  if (installed>0){ let c=0, reach=null; for (const k of pDays){ c+=baseDaily.get(k); if (c>=installed){ reach=parse(k); break; } }
+    if (reach) varDays = wdDiff(asOf, reach); } // negative = behind plan
+  // figures
+  const figs=$("progFigs"); figs.replaceChildren();
+  const fig=(v,l,cls)=>figs.append(el("div",{class:"fig"}, el("b",{class:cls||null,text:v}), el("span",{text:l})));
+  fig(`${nf.format(installed)} of ${nf.format(total)}`, `APs installed (${total?Math.round(installed/total*100):0}%)`);
+  fig(nf.format(Math.round(plannedToday)), `planned by ${iso(asOf)===iso(today)?"today":fShort.format(asOf)} at ${s.mins} min per AP`);
+  if (installed>0){
+    const diff=installed-plannedToday;
+    const behindTxt = diff===0 ? "on plan" : varDays ? `${Math.abs(varDays)} working day${Math.abs(varDays)===1?"":"s"} ${varDays>0?"ahead of":"behind"} plan` : `less than a day ${diff>0?"ahead of":"behind"} plan`;
+    fig(`${diff>=0?"+":"−"}${nf.format(Math.abs(Math.round(diff)))} APs`, behindTxt, diff<0?"later":diff>0?"earlier":null);
+    if (paceRatio!=null) fig(`${Math.round(paceRatio*100)}% of plan`, `recent pace, ${pace.toFixed(1)} APs a day ≈ ${Math.round(paceMins)} min per AP (plan ${s.mins})`, paceRatio<0.95?"later":paceRatio>1.05?"earlier":null);
+    if (forecast){ const d=wdDiff(pEnd, forecast); fig(fLong.format(forecast), `forecast finish at this pace (${d===0?"same as plan":`${Math.abs(d)} working days ${d>0?"later":"earlier"} than plan`})`, d>0?"later":d<0?"earlier":null); }
+  } else {
+    fig(fLong.format(pEnd), "planned finish");
+  }
+  // chart
+  const host=$("progSvg"); host.replaceChildren();
+  let xMin=pStart, xMax=pEnd;
+  const alt = mins!==s.mins ? planAtMins : null;
+  let altEnd=null; if (alt){ const k=[...alt.daily.keys()].sort(); altEnd=parse(k[k.length-1]); if (altEnd>xMax) xMax=altEnd; }
+  if (firstLog && firstLog<xMin) xMin=firstLog; if (lastLog && lastLog>xMax) xMax=lastLog; if (forecast && forecast>xMax) xMax=forecast;
+  xMin=addDays(xMin,-((xMin.getDay()+6)%7)); xMax=addDays(xMax,7-((xMax.getDay()+6)%7));
+  const W=900, H=320, L=56, R=118, T=18, B=34;
+  const xs=d=>L+(d-xMin)/(xMax-xMin)*(W-L-R), ys=v=>T+(1-v/total)*(H-T-B);
+  const NS="http://www.w3.org/2000/svg";
+  const S_=(tag,attrs,text)=>{ const e=document.createElementNS(NS,tag); for (const [k,v] of Object.entries(attrs)) e.setAttribute(k,v); if (text!=null) e.textContent=text; return e; };
+  const svg=S_("svg",{viewBox:`0 0 ${W} ${H}`,role:"img","aria-label":"Cumulative APs installed: planned against actual"});
+  const step = total>2000?500:total>800?200:100;
+  for (let v=0; v<=total; v+=step){ const y=ys(v); svg.append(S_("line",{x1:L,x2:W-R,y1:y,y2:y,stroke:"var(--line)"})); svg.append(S_("text",{x:L-8,y:y+4,"text-anchor":"end",class:"ax"},nf.format(v))); }
+  { const y=ys(total); svg.append(S_("line",{x1:L,x2:W-R,y1:y,y2:y,stroke:"var(--line-strong)","stroke-dasharray":"2 3"})); svg.append(S_("text",{x:L+4,y:y-5,class:"ax"},`${nf.format(total)} APs in total`)); }
+  for (let m=new Date(xMin.getFullYear(),xMin.getMonth()+1,1); m<xMax; m=new Date(m.getFullYear(),m.getMonth()+1,1)){ const x=xs(m); svg.append(S_("line",{x1:x,x2:x,y1:H-B,y2:H-B+4,stroke:"var(--line-strong)"})); svg.append(S_("text",{x:x+3,y:H-B+16,class:"ax"},fMonth.format(m))); }
+  svg.append(S_("line",{x1:L,x2:W-R,y1:H-B,y2:H-B,stroke:"var(--line-strong)"}));
+  if (today>=xMin && today<=xMax){ const x=xs(today); svg.append(S_("line",{x1:x,x2:x,y1:T,y2:H-B,stroke:"var(--today)","stroke-width":1.5})); svg.append(S_("text",{x:x+4,y:T+10,class:"ax",fill:"var(--today)",style:"fill:var(--today)"},"Today")); }
+  const path=(pts,attrs)=>{ if (!pts.length) return; svg.append(S_("path",{d:pts.map((p,i)=>`${i?"L":"M"}${xs(p.d).toFixed(1)},${ys(p.v).toFixed(1)}`).join(" "),fill:"none","stroke-linejoin":"round",...attrs})); };
+  const halo="paint-order:stroke;stroke:var(--surface);stroke-width:4px;stroke-linejoin:round;";
+  const endLabel=(pts,text,colour)=>{ if (!pts.length) return; const p=pts[pts.length-1]; svg.append(S_("text",{x:xs(p.d)+6,y:ys(p.v)+4,class:"lbl",style:`${halo}fill:${colour}`},text)); };
+  const basePts=[{d:addDays(pStart,-1),v:0}, ...cumulative(baseDaily,pStart,pEnd)];
+  path(basePts,{stroke:"var(--fg2)","stroke-width":2});
+  endLabel(basePts,`Plan · ${fShort.format(pEnd)}`,"var(--fg2)");
+  let altPts=[]; if (alt){ const k=[...alt.daily.keys()].sort(); altPts=[{d:addDays(parse(k[0]),-1),v:0}, ...cumulative(alt.daily,parse(k[0]),altEnd)];
+    path(altPts,{stroke:"var(--muted)","stroke-width":1.5,"stroke-dasharray":"5 4"}); endLabel(altPts,`${mins} min · ${fShort.format(altEnd)}`,"var(--muted)"); }
+  let actPts=[];
+  if (installed>0){ let c=0; actPts=[{d:addDays(firstLog,-1),v:0}]; for (let x=new Date(firstLog); x<=lastLog; x=addDays(x,1)){ const v=act.get(iso(x))||0; if (!isWork(x) && !v) continue; c+=v; actPts.push({d:new Date(x),v:c}); }
+    if (fcPts.length>1){ path(fcPts,{stroke:"var(--accent)","stroke-width":2,"stroke-dasharray":"2 4"}); endLabel(fcPts,`Forecast · ${fShort.format(forecast)}`,"var(--accent)"); }
+    path(actPts,{stroke:"var(--accent)","stroke-width":2.5});
+    for (const p of actPts.slice(1)) if (act.get(iso(p.d))) svg.append(S_("circle",{cx:xs(p.d),cy:ys(p.v),r:3,fill:"var(--accent)",stroke:"var(--surface)","stroke-width":1.5}));
+    const lp=actPts[actPts.length-1]; svg.append(S_("text",{x:xs(lp.d)+8,y:ys(lp.v)-12,class:"lbl",style:`${halo}fill:var(--accent)`},`Actual · ${nf.format(installed)}`)); }
+  // hover crosshair
+  const cross=S_("line",{x1:0,x2:0,y1:T,y2:H-B,stroke:"var(--fg2)","stroke-width":1,opacity:0}); svg.append(cross);
+  const hit=S_("rect",{x:L,y:T,width:W-L-R,height:H-T-B,fill:"transparent"}); svg.append(hit);
+  const tip=$("progTip"), valAt=(pts,d)=>{ let v=null; for (const p of pts){ if (p.d<=d) v=p.v; else break; } return v; };
+  hit.addEventListener("pointermove",e=>{ const r=svg.getBoundingClientRect(); const px=(e.clientX-r.left)/r.width*W; let d=new Date(xMin.getTime()+(px-L)/(W-L-R)*(xMax-xMin)); d.setHours(0,0,0,0);
+    const cx=xs(d); cross.setAttribute("x1",cx); cross.setAttribute("x2",cx); cross.setAttribute("opacity",.4);
+    const pv=valAt(basePts,d), av=lastLog && d<=lastLog ? valAt(actPts,d) : null, fv=fcPts.length && d>lastLog ? valAt(fcPts,d) : null, alv=alt? valAt(altPts,d) : null;
+    tip.replaceChildren(el("b",{text:fLong.format(d)}), el("div",{text:`Plan: ${nf.format(Math.round(pv||0))} APs`}), alv!=null? el("div",{text:`At ${mins} min: ${nf.format(Math.round(alv))}`}) : null,
+      av!=null? el("div",{text:`Actual: ${nf.format(Math.round(av))} APs${act.get(iso(d))?` (+${act.get(iso(d))} that day)`:""}`}) : null, fv!=null? el("div",{text:`Forecast: ${nf.format(Math.round(fv))}`}) : null);
+    const cr=$("progChart").getBoundingClientRect(); tip.hidden=false; tip.style.left=Math.max(4,Math.min(e.clientX-cr.left+12, cr.width-tip.offsetWidth-4))+"px"; tip.style.top=(e.clientY-cr.top+14)+"px"; });
+  hit.addEventListener("pointerleave",()=>{ tip.hidden=true; cross.setAttribute("opacity",0); });
+  host.append(svg);
+  // legend
+  const lg=$("progLegend"); lg.replaceChildren();
+  const key=(dash,colour,width,text)=>{ const k=S_("svg",{width:26,height:10,"aria-hidden":"true"}); k.append(S_("line",{x1:1,x2:25,y1:5,y2:5,stroke:colour,"stroke-width":width,...(dash?{"stroke-dasharray":dash}:{})})); return el("span",{class:"key"}, k, text); };
+  lg.append(key(null,"var(--fg2)",2,`Plan at ${s.mins} min per AP (spreadsheet)`));
+  if (alt) lg.append(key("5 4","var(--muted)",1.5,`What if ${mins} min per AP`));
+  if (installed>0){ lg.append(key(null,"var(--accent)",2.5,"Actual (Install Log)")); if (fcPts.length>1) lg.append(key("2 4","var(--accent)",2,"Forecast at the recent pace")); }
+  $("progNote").textContent = installed>0
+    ? `Recent pace compares what was installed with what the plan expected over the last ${paceDays} working day${paceDays===1?"":"s"} with installs planned or logged (${fShort.format(paceFrom)} to ${fShort.format(asOf)}). The forecast starts from the actual total and runs the rest of the plan at that pace${s.teams2!=null&&s.from2?`, including the second team from ${fLong.format(parse(s.from2))}`:""}. Comparisons are as of ${fLong.format(asOf)}, the last day logged.`
+    : "No installs logged yet. Add a row to the Install Log tab in the spreadsheet for each building on each day (date, building, APs installed) and the actual line and forecast will appear here.";
 }
 function renderOrder(ph){
   const strip=$("strip"), cards=$("phases"); strip.replaceChildren(); cards.replaceChildren();
@@ -420,7 +570,7 @@ function renderFigures(plan, ph){
   const aps=ph.reduce((s,p)=>s+p.aps,0), b=ph.reduce((s,p)=>s+p.buildings,0), done=ph.reduce((s,p)=>s+p.done,0);
   const sites=new Set(model.rows.filter(inScope).map(r=>r.site)).size;
   const fin=maxIso(ph.map(p=>p.end).filter(Boolean)), st=minIso(ph.map(p=>p.start).filter(Boolean));
-  for (const [v,l] of [[nf.format(aps),"APs in scope"],[String(sites),"sites"],[String(b),"buildings"],[`${done} of ${b}`,"buildings complete"],[st?fLong.format(parse(st)):"–","first day on site"],[fin?fLong.format(parse(fin)):"–","planned finish"]])
+  for (const [v,l] of [[nf.format(aps),"APs in scope"],[String(sites),"sites"],[String(b),"buildings"],[`${done} of ${b}`,"buildings complete"],[st?fLong.format(parse(st)):"–","first installs"],[fin?fLong.format(parse(fin)):"–","planned finish"]])
     box.append(el("div",{class:"fig"}, el("b",{text:v}), el("span",{text:l})));
   const src=model.source;
   $("source").textContent = `From ${src.name}${src.modified ? ", updated "+fStamp.format(src.modified) : ""}.`;
@@ -535,10 +685,11 @@ function renderTimeline(plan, ph){
 }
 function renderTable(plan, ph){
   const t=$("sched"); t.replaceChildren();
-  t.append(el("thead",{}, el("tr",{}, ...["Order","Building","Floors","APs","Pre-mig. issues","Start","End","Work days","Status","Notes"].map((h,i)=>el("th",{scope:"col",class:[3,4,7].includes(i)?"n":null,text:h})))));
+  t.append(el("thead",{}, el("tr",{}, ...["Order","Building","Floors","APs","Installed","Pre-mig. issues","Start","End","Work days","Status","Notes"].map((h,i)=>el("th",{scope:"col",class:[3,4,5,8].includes(i)?"n":null,text:h})))));
+  const done=new Map(); for (const e of model.log) done.set(e.building.toLowerCase(),(done.get(e.building.toLowerCase())||0)+e.aps);
   for (const p of ph){
     const tb=el("tbody");
-    tb.append(el("tr",{class:"grp"}, el("th",{colspan:"10",scope:"colgroup"}, el("span",{class:"chip",style:`--c:${siteVar(p.site)}`,text:`${p.no} · ${p.site}`}), " "+p.label,
+    tb.append(el("tr",{class:"grp"}, el("th",{colspan:"11",scope:"colgroup"}, el("span",{class:"chip",style:`--c:${siteVar(p.site)}`,text:`${p.no} · ${p.site}`}), " "+p.label,
       el("span",{class:"meta",text:`${nf.format(p.aps)} APs · ${p.buildings} building${p.buildings===1?"":"s"} · ${range(parse(p.start),parse(p.end))}`}))));
     for (const r of model.rows.filter(r=>r.phase===p.no)){
       const d=plan.get(r.id); const s=d&&parse(d.start), e=d&&parse(d.end);
@@ -548,6 +699,7 @@ function renderTable(plan, ph){
           r.dup? el("div",{class:"hint",text:`${r.dup} duplicate rows in the tracker not counted`}) : null),
         el("td",{class:"floors",text:r.floors}),
         el("td",{class:"n",text: r.aps>0 && r.status!=="Out of scope" ? nf.format(r.aps) : `0 (${r.oos} out of scope)`}),
+        el("td",{class:"n",text: done.get(r.building.toLowerCase()) ? nf.format(done.get(r.building.toLowerCase())) : "–"}),
         el("td",{class:"n"}, r.pre? el("span",{class:"issues",text:String(r.pre)}) : "–"),
         el("td",{class:"d",text:s?fLong.format(s):"–"}), el("td",{class:"d",text:e?fLong.format(e):"–"}),
         el("td",{class:"n",text:s&&e?String(workDays(s,e)):"–"}),
