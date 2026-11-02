@@ -1,8 +1,10 @@
 <!doctype html>
+<!-- Barts Wi-Fi Refresh Planner page, version 1.2 (2 Nov 2026). Change PAGE_VERSION below and the version text in the header when you edit this file. -->
 <html lang="en-GB">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="version" content="1.2">
 <title>Barts Wi-Fi Refresh Planner</title>
 <meta name="description" content="Order of works and dates for the Barts Health Wi-Fi access point refresh, read from the planner spreadsheet.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -45,6 +47,7 @@ button,select,input{font:inherit;color:inherit}
 header.top{display:grid;gap:12px}
 .sub{color:var(--fg2);margin:0;max-width:75ch}
 .source{font-size:13px;color:var(--muted)}
+.ver{display:inline-block;font:500 11.5px/1 var(--f-mono);letter-spacing:.04em;color:var(--fg2);border:1px solid var(--line-strong);border-radius:3px;padding:3px 6px;justify-self:start}
 .figures{display:flex;flex-wrap:wrap;gap:8px 32px}
 .fig{display:grid;gap:2px}
 .fig b{font:600 24px/1.1 var(--f-display);font-variant-numeric:tabular-nums}
@@ -164,6 +167,7 @@ details.iss summary{cursor:pointer;font-family:var(--f-display);font-weight:600;
     <h1>Wi-Fi Refresh Planner</h1>
     <p class="sub">Every site and building in the access point refresh, in the order the work is being done. The dates are worked out from the planner spreadsheet each time this page opens.</p>
     <div class="source" id="source"></div>
+    <span class="ver" id="ver">Page version 1.2 · 2 Nov 2026</span>
     <div class="figures" id="figures" aria-live="polite"></div>
     <div class="banner" id="banner" hidden></div>
   </header>
@@ -243,6 +247,7 @@ details.iss summary{cursor:pointer;font-family:var(--f-display);font-weight:600;
 "use strict";
 // The spreadsheet this page reads. Keep it in the same folder as this page.
 const XLSX_FILE = "Barts_WiFi_Refresh_Planner.xlsx";
+const PAGE_VERSION = "1.2 · 2 Nov 2026"; // keep in step with the version text in the header
 
 const SITE_COLOURS = { RLH:"--s-rlh", MEH:"--s-meh", SBH:"--s-sbh", RS:"--s-rs", NUH:"--s-nuh", WCH:"--s-wch" };
 const MIN_STEPS = [5,10,15,20,25,30,35,40,45,50,55,60];
@@ -568,6 +573,7 @@ function renderFoot(){
   const f=$("foot"); f.replaceChildren();
   f.append(el("p",{text:`To change the plan, edit ${XLSX_FILE} (settings on the Order of Works tab; fixed dates, status and notes on the Buildings tab) and upload it again in place of the old copy. This page reads it each time it opens.`}));
   f.append(el("p",{text:"Work days are Monday to Friday, leaving out the bank holidays and other days listed on the spreadsheet's Non-Working Days tab."}));
+  f.append(el("p",{text:`Page version ${PAGE_VERSION}.`}));
   const b=el("button",{class:"linkbtn",type:"button",text:"Open a different copy of the spreadsheet"}); b.addEventListener("click",()=>$("pick").click());
   f.append(el("p",{}, b));
 }
